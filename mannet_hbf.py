@@ -23,6 +23,7 @@ Usage:
 # %%
 import os
 import json
+import sys
 import math
 import time
 import argparse
@@ -797,7 +798,10 @@ def run_fig6(argv):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(add_help=False)
     ap.add_argument("--exp", default="main", choices=["main", "fig6"])
-    a, rest = ap.parse_known_args()
+    # Kaggle scripts take no CLI args: set the experiment to run there by editing this list.
+    KAGGLE_ARGV = ["--exp", "fig6"]
+    argv = sys.argv[1:] if (len(sys.argv) > 1 or not os.path.isdir("/kaggle/working")) else KAGGLE_ARGV
+    a, rest = ap.parse_known_args(argv)
     if a.exp == "fig6":
         run_fig6(rest)
     else:
