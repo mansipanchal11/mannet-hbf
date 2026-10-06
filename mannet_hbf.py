@@ -795,14 +795,158 @@ def run_fig6(argv):
     return rows
 
 
+# %% Fig. 4: convergence
+@torch.no_grad()
+def mannet_traj(model, Fopt, cfg: Cfg, I_max, C=None):
+    """F_RF after each unfolding iteration 1..I_max (each iteration = L layers). Mirrors mannet_fc."""
+    F_rf = random_unit_modulus(Fopt.shape[0], cfg.Nt, cfg.NRF, Fopt.device)
+    cmask = None
+    if C is not None:
+        F_rf = F_rf * C
+        cmask = mask_to_real(C)
+    Fbb = ls_bb(F_rf, Fopt)
+    traj = []
+    for _ in range(I_max):
+        F_rf = model.to_c(model(Fopt, Fbb, cmask)[-1])
+        if cfg.normalize_loop:
+            F_rf = unit_modulus(F_rf)
+        Fbb = ls_bb(F_rf, Fopt)
+        traj.append(unit_modulus(F_rf))
+    return traj
+
+
+@torch.no_grad()
+def ao_traj(Fopt, cfg: Cfg, n_iter):
+    """AO-FC after each alternating sweep 1..n_iter, without early stopping. Mirrors ao_fc."""
+    F = random_unit_modulus(Fopt.shape[0], cfg.Nt, cfg.NRF, Fopt.device)
+    Fbb = ls_bb(F, Fopt)
+    traj = []
+    for _ in range(n_iter):
+        A, C = ls_statistics(Fbb, Fopt)
+        for j in range(cfg.NRF):
+            s = (F @ A[:, :, j:j + 1])[..., 0] - F[:, :, j] * A[:, j, j][:, None]
+            F[:, :, j] = unit_modulus(C[:, :, j] - s)
+        Fbb = ls_bb(F, Fopt)
+        traj.append(F.clone())
+    return traj
+
+
+@torch.no_grad()
+def mo_traj(Fopt, cfg: Cfg, n_iter, per_outer=5):
+    """MO-AltMin-FC versus the total number of Riemannian-CG (inner) iterations.
+
+    The digital precoder is updated every per_outer inner iterations (our reading of the paper's
+    "total number of inner iterations"); no early stopping. Returns F_RF at multiples of per_outer.
+    """
+    F = random_unit_modulus(Fopt.shape[0], cfg.Nt, cfg.NRF, Fopt.device)
+    Fbb = ls_bb(F, Fopt)
+    traj = []
+    for _ in range(n_iter // per_outer):
+        A, C = ls_statistics(Fbb, Fopt)
+        F = riemannian_cg(F, A, C, per_outer)
+        Fbb = ls_bb(F, Fopt)
+        traj.append(F.clone())
+    return traj
+
+
+def run_fig4(argv):
+    """SE versus iteration count for Nt=128 at 10 and 20 dB (paper Fig. 4); FC and subManNet-SC."""
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--quick", action="store_true")
+    ap.add_argument("--epochs", type=int)
+    ap.add_argument("--n_test", type=int)
+    ap.add_argument("--out", type=str)
+    a, _ = ap.parse_known_args(argv)
+    cfg = Cfg()
+    if a.quick:
+        cfg.Nth, cfg.Ntv, cfg.K, cfg.epochs, cfg.n_train, cfg.n_test = 4, 4, 16, 2, 64, 5
+    for k in ("epochs", "n_test", "out"):
+        if getattr(a, k) is not None:
+            setattr(cfg, k, getattr(a, k))
+    out_dir = os.path.join(cfg.out, "fig4") if a.out is None else a.out
+    os.makedirs(out_dir, exist_ok=True)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    torch.manual_seed(cfg.seed)
+    np.random.seed(cfg.seed)
+    gen = torch.Generator().manual_seed(cfg.seed)
+    snrs = (10, 20)
+    I_max = 20                       # ManNet iterations evaluated (trained with I_train, default inference I_net)
+    n_ao = 100 if not a.quick else 20
+    n_mo = 100 if not a.quick else 20
+    print(f"device={device} Nt={cfg.Nt} K={cfg.K}")
+
+    H_tr = generate_channels(cfg, cfg.n_train, gen).to(device)
+    Fopt_tr = top_right_sv(H_tr, cfg.Ns)[0]
+    masks_tr = strongest_subcarrier_mapping(H_tr, cfg.NRF)
+    del H_tr
+    H = generate_channels(cfg, cfg.n_test, gen).to(device)
+    Fopt = top_right_sv(H, cfg.Ns)[0]
+    model, _ = train_mannet(cfg, Fopt_tr, device)
+    sub, _ = train_mannet(cfg, Fopt_tr, device, masks=masks_tr)
+    C_star = strongest_subcarrier_mapping(H, cfg.NRF)
+
+    def se(F_rf, sdb):
+        snr = 10 ** (sdb / 10)
+        F = F_rf[:, None] @ optimal_digital(H, F_rf, snr, cfg.Ns)
+        return spectral_efficiency(H, F, snr, cfg.Ns).mean().item()
+
+    ones = np.arange(1, I_max + 1)
+    curves = {
+        "ManNet-FC": (ones * cfg.L, mannet_traj(model, Fopt, cfg, I_max)),
+        "subManNet-SC": (ones * cfg.L, mannet_traj(sub, Fopt, cfg, I_max, C=C_star)),
+        "AO-FC": (np.arange(1, n_ao + 1), ao_traj(Fopt, cfg, n_ao)),
+        "MO-AltMin-FC": (np.arange(5, n_mo + 1, 5), mo_traj(Fopt, cfg, n_mo)),
+    }
+    omp = omp_fc(Fopt, cfg, omp_dictionary(cfg, device))
+    res = {"snr_db": list(snrs), "DBF": [se_digital(H, 10 ** (s / 10), cfg.Ns).mean().item() for s in snrs],
+           "OMP-FC": [se(omp, s) for s in snrs]}
+    for name, (x, traj) in curves.items():
+        res[name + "_iters"] = [int(v) for v in x]
+        res[name] = [[se(F, s) for F in traj] for s in snrs]
+    np.savez(f"{out_dir}/fig4.npz", **{k: np.array(v) for k, v in res.items()})
+    with open(f"{out_dir}/fig4.json", "w") as f:
+        json.dump({"argv": list(argv), "seed": cfg.seed, "lr": cfg.lr, "epochs": cfg.epochs, "n_test": cfg.n_test,
+                   "K": cfg.K, "Nt": cfg.Nt, "L": cfg.L, "I_train": cfg.I_train, "mo_inner_per_outer": 5,
+                   "results": res}, f, indent=1)
+    for i, s in enumerate(snrs):
+        print(f"\nSNR {s} dB: DBF {res['DBF'][i]:.3f}, OMP-FC {res['OMP-FC'][i]:.3f}")
+        for name in curves:
+            x, y = res[name + "_iters"], res[name][i]
+            pick = [j for j, v in enumerate(x) if v in (3, 6, 9, 15, 30, 60, 100, 10, 20, 50)]
+            print(f"  {name:14s} " + ", ".join(f"{x[j]}:{y[j]:.3f}" for j in pick) + f", final {x[-1]}:{y[-1]:.3f}")
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        fig, ax = plt.subplots(1, len(snrs), figsize=(11, 4))
+        for i, s in enumerate(snrs):
+            ax[i].axhline(res["DBF"][i], color="k", label="DBF-FC")
+            ax[i].axhline(res["OMP-FC"][i], color="m", ls="--", label="OMP-FC")
+            for name, m in zip(curves, ("r-o", "c-s", "g-d", "b-^")):
+                ax[i].plot(res[name + "_iters"], res[name][i], m, ms=3, label=name)
+            ax[i].set_xscale("log")
+            ax[i].set_title(f"SNR = {s} dB")
+            ax[i].set_xlabel("Iterations (ManNet: I_net * L)")
+            ax[i].set_ylabel("Spectral efficiency (bits/s/Hz)")
+            ax[i].grid(alpha=0.3)
+            ax[i].legend(fontsize=7)
+        plt.tight_layout()
+        plt.savefig(f"{out_dir}/fig4.png", dpi=150)
+    except Exception as e:
+        print("plot skipped:", e)
+    return res
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(add_help=False)
-    ap.add_argument("--exp", default="main", choices=["main", "fig6"])
+    ap.add_argument("--exp", default="main", choices=["main", "fig4", "fig6"])
     # Kaggle scripts take no CLI args: set the experiment to run there by editing this list.
-    KAGGLE_ARGV = ["--exp", "fig6"]
+    KAGGLE_ARGV = ["--exp", "fig4"]
     argv = sys.argv[1:] if (len(sys.argv) > 1 or not os.path.isdir("/kaggle/working")) else KAGGLE_ARGV
     a, rest = ap.parse_known_args(argv)
     if a.exp == "fig6":
         run_fig6(rest)
+    elif a.exp == "fig4":
+        run_fig4(rest)
     else:
         main(rest)
