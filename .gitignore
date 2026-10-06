@@ -1,0 +1,7 @@
+out/
+__pycache__/
+*.pt
+*.pth
+kaggle.json
+.kaggle/
+*.ipynb_checkpoints/
