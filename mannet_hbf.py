@@ -22,6 +22,7 @@ Usage:
 """
 # %%
 import os
+import json
 import math
 import time
 import argparse
@@ -745,5 +746,59 @@ def main(argv=None):
     return model, res
 
 
+# %% Fig. 6: SE vs Nt
+NT_GRID = {16: (4, 4), 32: (4, 8), 64: (8, 8), 128: (8, 16)}   # Nt -> (Nth, Ntv)
+
+
+def run_fig6(argv):
+    """Retrain ManNet/subManNet for each Nt and record SE at 10 dB (paper Fig. 6)."""
+    base = Cfg().out
+    quick = "--quick" in argv
+    root = os.path.join(base, "fig6")
+    os.makedirs(root, exist_ok=True)
+    rows = {}
+    for nt, (nh, nv) in NT_GRID.items():
+        d = os.path.join(root, f"Nt{nt}")
+        main(list(argv) + ["--Nth", str(nh), "--Ntv", str(nv), "--out", d])
+        r = np.load(f"{d}/results.npz")
+        i10 = list(r["snr_db"]).index(10)
+        rows[nt] = {k: float(r[k][i10]) for k in r.files
+                    if k not in ("snr_db", "loss", "loss_sub") and r[k].shape == r["snr_db"].shape}
+    names = list(rows[min(rows)].keys())
+    np.savez(f"{root}/fig6.npz", Nt=np.array(list(rows)), **{n: np.array([rows[nt].get(n, np.nan) for nt in rows]) for n in names})
+    c = Cfg()
+    with open(f"{root}/fig6.json", "w") as f:
+        json.dump({"snr_db": 10, "quick": quick, "argv": list(argv), "seed": c.seed, "lr": c.lr,
+                   "epochs": c.epochs, "n_test": c.n_test, "K": c.K, "se_at_10dB": rows}, f, indent=1)
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        nts = list(rows)
+        plt.figure(figsize=(7, 4.5))
+        for n in names:
+            plt.plot(nts, [rows[nt].get(n, np.nan) for nt in nts], "-o", label=n, ms=4)
+        plt.xscale("log", base=2)
+        plt.xticks(nts, nts)
+        plt.xlabel("Nt")
+        plt.ylabel("Spectral efficiency (bits/s/Hz) @ 10 dB")
+        plt.grid(alpha=0.3)
+        plt.legend(fontsize=7)
+        plt.tight_layout()
+        plt.savefig(f"{root}/fig6.png", dpi=150)
+    except Exception as e:
+        print("plot skipped:", e)
+    print("\nFig. 6 SE @10 dB:")
+    for nt in rows:
+        print(f"Nt={nt}: " + ", ".join(f"{n} {rows[nt][n]:.3f}" for n in names if n in rows[nt]))
+    return rows
+
+
 if __name__ == "__main__":
-    main()
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument("--exp", default="main", choices=["main", "fig6"])
+    a, rest = ap.parse_known_args()
+    if a.exp == "fig6":
+        run_fig6(rest)
+    else:
+        main(rest)
