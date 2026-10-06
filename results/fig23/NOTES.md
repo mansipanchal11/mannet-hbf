@@ -25,6 +25,6 @@ Fig. 3 SE (bits/s/Hz) @ 20 dB:
 Observations vs paper:
 - Fig. 2 matches qualitatively: I_train=3 converges faster and lower, ~flat after ~10 epochs; I_train=1 is still decreasing at epoch 30;
   ManNet's converged loss is below subManNet's. (Caveat: the logged loss is averaged over the I_train inner steps, so the two I_train curves are not strictly like-for-like.)
-- Fig. 3: SE depends strongly on I_net (1 -> 10 gains ~1.4 dB-equivalent, +1.4 bits/s/Hz) and hardly on L for L>=2, as in the paper.
+- Fig. 3: SE depends strongly on I_net (I_net 1 -> 10 gains ~1.5 bits/s/Hz) and hardly on L for L>=2, as in the paper.
   Differences: our L=1 is far worse (~10-12 vs ~21-22): a single layer has x_0=0, so w1 is unused and the net takes one gradient step per iteration.
   We see no (slight) SE increase with L beyond 2; it is flat or marginally decreasing. L=3 is adequate, consistent with the paper's choice.
