@@ -937,16 +937,122 @@ def run_fig4(argv):
     return res
 
 
+# %% Figs. 2-3: training loss and SE vs L
+def run_fig23(argv):
+    """Fig. 2: training loss, I_train in {1,3}, Nt=64, L=6 (ManNet and subManNet).
+    Fig. 3: ManNet-FC SE at 20 dB vs L for I_net in {1,2,5,10}, Nt=128, I_train=3."""
+    from dataclasses import replace
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--quick", action="store_true")
+    ap.add_argument("--epochs", type=int)
+    ap.add_argument("--n_test", type=int)
+    ap.add_argument("--out", type=str)
+    a, _ = ap.parse_known_args(argv)
+    cfg = Cfg()
+    if a.quick:
+        cfg.Nth, cfg.Ntv, cfg.K, cfg.epochs, cfg.n_train, cfg.n_test = 4, 4, 16, 2, 64, 5
+    for k in ("epochs", "n_test", "out"):
+        if getattr(a, k) is not None:
+            setattr(cfg, k, getattr(a, k))
+    out_dir = os.path.join(cfg.out, "fig23") if a.out is None else a.out
+    os.makedirs(out_dir, exist_ok=True)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"device={device}")
+
+    # ---- Fig. 2 (Nt=64, L=6)
+    c2 = replace(cfg, L=6)
+    if not a.quick:
+        c2.Nth, c2.Ntv = 8, 8
+    torch.manual_seed(cfg.seed)
+    gen = torch.Generator().manual_seed(cfg.seed)
+    H = generate_channels(c2, c2.n_train, gen).to(device)
+    Fo = top_right_sv(H, c2.Ns)[0]
+    masks = strongest_subcarrier_mapping(H, c2.NRF)
+    del H
+    loss = {}
+    for I_tr in (1, 3):
+        for name, m in (("ManNet", None), ("subManNet", masks)):
+            torch.manual_seed(cfg.seed)
+            _, h = train_mannet(replace(c2, I_train=I_tr), Fo, device, masks=m, log=lambda *_: None)
+            loss[f"{name}_Itrain{I_tr}"] = h
+            print(f"Fig2 {name} I_train={I_tr}: first {h[0]:.3f} last {h[-1]:.3f}")
+
+    # ---- Fig. 3 (Nt=128, I_train=3, SNR 20 dB)
+    c3 = replace(cfg)
+    if not a.quick:
+        c3.Nth, c3.Ntv = 16, 8
+    Ls = [1, 2, 3, 4, 5, 6]
+    I_nets = [1, 2, 5, 10]
+    torch.manual_seed(cfg.seed)
+    gen = torch.Generator().manual_seed(cfg.seed + 1)
+    H = generate_channels(c3, c3.n_train, gen).to(device)
+    Fo_tr = top_right_sv(H, c3.Ns)[0]
+    H_te = generate_channels(c3, c3.n_test, gen).to(device)
+    Fo_te = top_right_sv(H_te, c3.Ns)[0]
+    del H
+    snr = 10 ** 2.0
+    se_dbf = se_digital(H_te, snr, c3.Ns).mean().item()
+    se = {I: [] for I in I_nets}
+    for L in Ls:
+        torch.manual_seed(cfg.seed)
+        model, _ = train_mannet(replace(c3, L=L), Fo_tr, device, log=lambda *_: None)
+        for I in I_nets:
+            F_rf = mannet_fc(model, Fo_te, replace(c3, L=L), I_net=I)
+            F = F_rf[:, None] @ optimal_digital(H_te, F_rf, snr, c3.Ns)
+            se[I].append(spectral_efficiency(H_te, F, snr, c3.Ns).mean().item())
+        print(f"Fig3 L={L}: " + ", ".join(f"I_net={I} {se[I][-1]:.3f}" for I in I_nets))
+    print(f"DBF @20 dB: {se_dbf:.3f}")
+
+    np.savez(f"{out_dir}/fig23.npz", L=np.array(Ls), se_dbf=se_dbf,
+             **{k: np.array(v) for k, v in loss.items()}, **{f"se_Inet{I}": np.array(v) for I, v in se.items()})
+    with open(f"{out_dir}/fig23.json", "w") as f:
+        json.dump({"argv": list(argv), "seed": cfg.seed, "lr": cfg.lr, "epochs": cfg.epochs, "n_test": cfg.n_test,
+                   "K": cfg.K, "fig2": {"Nt": c2.Nt, "L": 6, "loss": loss},
+                   "fig3": {"Nt": c3.Nt, "I_train": c3.I_train, "snr_db": 20, "L": Ls, "se_dbf": se_dbf,
+                            "se": {str(I): v for I, v in se.items()}}}, f, indent=1)
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        fig, ax = plt.subplots(1, 3, figsize=(15, 4))
+        for i, name in enumerate(("ManNet", "subManNet")):
+            ref = max(loss[f"{name}_Itrain{t}"][0] for t in (1, 3))
+            for t, m in ((1, "--"), (3, "-")):
+                h = np.array(loss[f"{name}_Itrain{t}"]) / ref
+                ax[0].plot(range(1, len(h) + 1), h, m, color=f"C{i}", label=f"{name}, I_train={t}")
+        ax[0].set_yscale("log")
+        ax[0].set_xlabel("Epoch")
+        ax[0].set_ylabel("Training loss (normalized to epoch 1 of I_train=1 / I_train=3 max)")
+        ax[0].set_title(f"Fig. 2: Nt={c2.Nt}, L=6")
+        ax[0].legend(fontsize=7)
+        for I in I_nets:
+            ax[1].plot(Ls, se[I], "-o", label=f"I_net={I}")
+        ax[1].axhline(se_dbf, color="k", label="DBF")
+        ax[1].set_xlabel("L")
+        ax[1].set_ylabel("SE (bits/s/Hz) @ 20 dB")
+        ax[1].set_title(f"Fig. 3: ManNet-FC, Nt={c3.Nt}")
+        ax[1].legend(fontsize=7)
+        ax[2].axis("off")
+        for p in ax[:2]:
+            p.grid(alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(f"{out_dir}/fig23.png", dpi=150)
+    except Exception as e:
+        print("plot skipped:", e)
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(add_help=False)
-    ap.add_argument("--exp", default="main", choices=["main", "fig4", "fig6"])
+    ap.add_argument("--exp", default="main", choices=["main", "fig23", "fig4", "fig6"])
     # Kaggle scripts take no CLI args: set the experiment to run there by editing this list.
-    KAGGLE_ARGV = ["--exp", "fig4"]
+    KAGGLE_ARGV = ["--exp", "fig23"]
     argv = sys.argv[1:] if (len(sys.argv) > 1 or not os.path.isdir("/kaggle/working")) else KAGGLE_ARGV
     a, rest = ap.parse_known_args(argv)
     if a.exp == "fig6":
         run_fig6(rest)
     elif a.exp == "fig4":
         run_fig4(rest)
+    elif a.exp == "fig23":
+        run_fig23(rest)
     else:
         main(rest)
