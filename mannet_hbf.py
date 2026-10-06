@@ -1043,9 +1043,9 @@ def run_fig23(argv):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(add_help=False)
-    ap.add_argument("--exp", default="main", choices=["main", "fig23", "fig4", "fig6"])
+    ap.add_argument("--exp", default="main", choices=["main", "fig23", "fig4", "fig6", "all"])
     # Kaggle scripts take no CLI args: set the experiment to run there by editing this list.
-    KAGGLE_ARGV = ["--exp", "fig23"]
+    KAGGLE_ARGV = ["--exp", "all"]
     argv = sys.argv[1:] if (len(sys.argv) > 1 or not os.path.isdir("/kaggle/working")) else KAGGLE_ARGV
     a, rest = ap.parse_known_args(argv)
     if a.exp == "fig6":
@@ -1054,5 +1054,11 @@ if __name__ == "__main__":
         run_fig4(rest)
     elif a.exp == "fig23":
         run_fig23(rest)
+    elif a.exp == "all":
+        # main (Fig. 5) -> fig23 -> fig4 -> fig6; each experiment saves under <out>/<exp>/
+        main(list(rest) + ["--out", os.path.join(Cfg().out, "main")])
+        run_fig23(rest)
+        run_fig4(rest)
+        run_fig6(rest)
     else:
         main(rest)
